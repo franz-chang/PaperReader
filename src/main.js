@@ -6,6 +6,15 @@ import {
   getAdjacentPaperSlugs,
   parseRoute
 } from './lib/papers.js';
+import {
+  DEFAULT_READER_PREFERENCES,
+  buildPdfViewerSrc,
+  clampNoteScale,
+  clampReaderSplit,
+  sanitizeReaderPreferences
+} from './lib/reader.js';
+
+const READER_PREFERENCES_KEY = 'paperreader:reader-preferences';
 
 const app = document.querySelector('#app');
 
@@ -19,7 +28,8 @@ const state = {
   level2: '',
   sort: 'updated',
   readerNavOpen: false,
-  noteCache: new Map()
+  noteCache: new Map(),
+  readerPreferences: loadReaderPreferences()
 };
 
 bootstrap();
@@ -46,10 +56,15 @@ app.addEventListener('change', (event) => {
   if (target.matches('[data-sort-select]')) {
     state.sort = target.value;
     render();
+    return;
+  }
+
+  if (target.matches('[data-pdf-zoom-select]')) {
+    updateReaderPreferences({ pdfZoom: target.value });
   }
 });
 
-app.addEventListener('click', (event) => {
+app.addEventListener('click', async (event) => {
   const actionTarget = event.target.closest('[data-action]');
   if (!actionTarget) {
     return;
@@ -89,6 +104,52 @@ app.addEventListener('click', (event) => {
   if (action === 'close-reader-nav') {
     state.readerNavOpen = false;
     render();
+    return;
+  }
+
+  if (action === 'note-scale-up') {
+    updateReaderPreferences({ noteScale: clampNoteScale(state.readerPreferences.noteScale + 0.1) });
+    return;
+  }
+
+  if (action === 'note-scale-down') {
+    updateReaderPreferences({ noteScale: clampNoteScale(state.readerPreferences.noteScale - 0.1) });
+    return;
+  }
+
+  if (action === 'note-scale-reset') {
+    updateReaderPreferences({ noteScale: DEFAULT_READER_PREFERENCES.noteScale });
+    return;
+  }
+
+  if (action === 'toggle-browser-fullscreen') {
+    await toggleReaderFullscreen();
+  }
+});
+
+app.addEventListener('pointerdown', (event) => {
+  const resizer = event.target.closest('[data-reader-resizer]');
+  if (!resizer) {
+    return;
+  }
+
+  startReaderResize(event);
+});
+
+app.addEventListener('keydown', (event) => {
+  const resizer = event.target.closest('[data-reader-resizer]');
+  if (!resizer) {
+    return;
+  }
+
+  if (event.key === 'ArrowLeft') {
+    event.preventDefault();
+    updateReaderPreferences({ split: clampReaderSplit(state.readerPreferences.split - 3) });
+  }
+
+  if (event.key === 'ArrowRight') {
+    event.preventDefault();
+    updateReaderPreferences({ split: clampReaderSplit(state.readerPreferences.split + 3) });
   }
 });
 
@@ -109,6 +170,88 @@ async function bootstrap() {
   }
 
   render();
+}
+
+function loadReaderPreferences() {
+  try {
+    const raw = window.localStorage.getItem(READER_PREFERENCES_KEY);
+    if (!raw) {
+      return { ...DEFAULT_READER_PREFERENCES };
+    }
+    return sanitizeReaderPreferences(JSON.parse(raw));
+  } catch {
+    return { ...DEFAULT_READER_PREFERENCES };
+  }
+}
+
+function saveReaderPreferences() {
+  try {
+    window.localStorage.setItem(READER_PREFERENCES_KEY, JSON.stringify(state.readerPreferences));
+  } catch {
+    // Ignore storage failures in restricted environments.
+  }
+}
+
+function updateReaderPreferences(partialPreferences, { rerender = true } = {}) {
+  state.readerPreferences = sanitizeReaderPreferences({
+    ...state.readerPreferences,
+    ...partialPreferences
+  });
+  saveReaderPreferences();
+
+  if (rerender) {
+    render();
+  } else {
+    applyReaderPreferencesToDom();
+  }
+}
+
+function startReaderResize(event) {
+  const layout = app.querySelector('[data-reader-layout]');
+  if (!layout) {
+    return;
+  }
+
+  event.preventDefault();
+
+  const updateFromPointer = (clientX) => {
+    const bounds = layout.getBoundingClientRect();
+    const usableWidth = Math.max(bounds.width - 16, 1);
+    const offsetX = clientX - bounds.left;
+    const split = clampReaderSplit((offsetX / usableWidth) * 100);
+    updateReaderPreferences({ split }, { rerender: false });
+  };
+
+  updateFromPointer(event.clientX);
+
+  const onPointerMove = (moveEvent) => {
+    updateFromPointer(moveEvent.clientX);
+  };
+
+  const stopResize = () => {
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', stopResize);
+    window.removeEventListener('pointercancel', stopResize);
+    saveReaderPreferences();
+  };
+
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', stopResize);
+  window.addEventListener('pointercancel', stopResize);
+}
+
+async function toggleReaderFullscreen() {
+  const target = app.querySelector('[data-reader-fullscreen-target]');
+  if (!target || !document.fullscreenEnabled) {
+    return;
+  }
+
+  if (document.fullscreenElement) {
+    await document.exitFullscreen();
+    return;
+  }
+
+  await target.requestFullscreen();
 }
 
 function maybeLoadRouteNote() {
@@ -198,10 +341,29 @@ function render() {
 
   if (state.route.name === 'reader') {
     app.innerHTML = renderReaderView();
+    applyReaderPreferencesToDom();
     return;
   }
 
   app.innerHTML = renderLibraryView();
+}
+
+function applyReaderPreferencesToDom() {
+  const layout = app.querySelector('[data-reader-layout]');
+  const noteBody = app.querySelector('.pane-body--note');
+  const noteScaleValue = app.querySelector('[data-note-scale-value]');
+
+  if (layout) {
+    layout.style.gridTemplateColumns = `minmax(0, ${state.readerPreferences.split}fr) 16px minmax(0, ${100 - state.readerPreferences.split}fr)`;
+  }
+
+  if (noteBody) {
+    noteBody.style.setProperty('--reader-note-scale', String(state.readerPreferences.noteScale));
+  }
+
+  if (noteScaleValue) {
+    noteScaleValue.textContent = `${Math.round(state.readerPreferences.noteScale * 100)}%`;
+  }
 }
 
 function renderLoadingView() {
@@ -210,7 +372,7 @@ function renderLoadingView() {
       <div class="loading-card">
         <div class="eyebrow">PaperReader</div>
         <h1>Building your reading desk...</h1>
-        <p>正在加载论文索引和阅读空间。</p>
+        <p>正在加载论文索引和阅读工作台。</p>
       </div>
     </main>
   `;
@@ -409,9 +571,10 @@ function renderReaderView() {
   });
   const neighbors = getAdjacentPaperSlugs(siblingPapers, paper.slug);
   const noteState = paper.notePath ? state.noteCache.get(paper.notePath) : null;
+  const noteScalePercent = Math.round(state.readerPreferences.noteScale * 100);
 
   return `
-    <main class="shell shell-reader">
+    <main class="shell shell-reader" data-reader-fullscreen-target>
       <header class="reader-topbar">
         <div class="reader-topbar__main">
           <a class="back-link" href="#/">← 返回论文库</a>
@@ -427,27 +590,44 @@ function renderReaderView() {
           <a class="ghost-button" href="#/paper/${encodeURIComponent(neighbors.next ?? paper.slug)}" ${
             neighbors.next ? '' : 'aria-disabled="true" tabindex="-1"'
           }>下一篇</a>
+          <button class="ghost-button" data-action="toggle-browser-fullscreen">全屏模式</button>
           <button class="ghost-button" data-action="toggle-reader-nav">快速切换</button>
         </div>
       </header>
 
-      <section class="reader-layout">
+      <section class="reader-layout" data-reader-layout>
         <div class="reader-pane reader-pane--pdf">
           <div class="pane-header">
             <div>
               <div class="eyebrow">Paper PDF</div>
               <h2>原文阅读</h2>
             </div>
-            ${
-              paper.hasPdf
-                ? `<a class="ghost-button" href="${paper.pdfPath}" target="_blank" rel="noreferrer noopener">新标签打开</a>`
-                : ''
-            }
+            <div class="pane-tools">
+              <label class="inline-select">
+                <span>PDF 缩放</span>
+                <select data-pdf-zoom-select>
+                  ${renderPdfZoomOption('page-width', '适应宽度')}
+                  ${renderPdfZoomOption('100', '100%')}
+                  ${renderPdfZoomOption('125', '125%')}
+                  ${renderPdfZoomOption('150', '150%')}
+                  ${renderPdfZoomOption('175', '175%')}
+                  ${renderPdfZoomOption('200', '200%')}
+                </select>
+              </label>
+              ${
+                paper.hasPdf
+                  ? `<a class="ghost-button" href="${paper.pdfPath}" target="_blank" rel="noreferrer noopener">新标签打开</a>`
+                  : ''
+              }
+            </div>
           </div>
           <div class="pane-body pane-body--pdf">
             ${
               paper.hasPdf
-                ? `<iframe title="${escapeAttribute(paper.title)} PDF" src="${paper.pdfPath}#view=FitH"></iframe>`
+                ? `<iframe title="${escapeAttribute(paper.title)} PDF" src="${buildPdfViewerSrc(
+                    paper.pdfPath,
+                    state.readerPreferences.pdfZoom
+                  )}"></iframe>`
                 : `
                     <div class="empty-state">
                       <h3>PDF 不存在</h3>
@@ -458,11 +638,29 @@ function renderReaderView() {
           </div>
         </div>
 
+        <button
+          class="reader-resizer"
+          type="button"
+          data-reader-resizer
+          aria-label="调整论文与笔记宽度"
+          title="拖动以调整论文与笔记宽度"
+        >
+          <span></span>
+        </button>
+
         <div class="reader-pane reader-pane--note">
           <div class="pane-header">
             <div>
               <div class="eyebrow">Markdown Note</div>
               <h2>阅读笔记</h2>
+            </div>
+            <div class="pane-tools">
+              <div class="zoom-controls">
+                <button class="ghost-button" data-action="note-scale-down">A-</button>
+                <span class="zoom-value" data-note-scale-value>${noteScalePercent}%</span>
+                <button class="ghost-button" data-action="note-scale-up">A+</button>
+              </div>
+              <button class="ghost-button" data-action="note-scale-reset">重置字号</button>
             </div>
           </div>
           <div class="pane-body pane-body--note">
@@ -500,6 +698,12 @@ function renderReaderView() {
       </aside>
     </main>
   `;
+}
+
+function renderPdfZoomOption(value, label) {
+  return `<option value="${value}" ${
+    state.readerPreferences.pdfZoom === value ? 'selected' : ''
+  }>${label}</option>`;
 }
 
 function renderNotePane(paper, noteState) {

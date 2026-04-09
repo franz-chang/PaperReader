@@ -7,3 +7,7 @@
 
 ## 图3解释
 ![alt text](image.png)
+
+## $k_*$和$v_*$如何得到
+![alt text](image-4.png)
+![alt text](image-5.png)
